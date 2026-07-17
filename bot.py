@@ -319,7 +319,7 @@ def format_msg(s: dict) -> str:
     tr  = "📈 Uptrend" if s["action"] == "BUY" else "📉 Downtrend"
 
     return (
-        f"{e} <b>XAU/USD — {act}</b> 🥇\n"
+        f"{e} <b>XAU/USD — {act}</b> 📊 \n"
         f"<i>Oltin</i>\n\n"
         f"💰 Entry:  <b>{s['price']:.2f}</b>\n"
         f"🎯 TP1:   <b>{s['tp1']:.2f}</b>  (1:{s['rr1']}R)\n"
