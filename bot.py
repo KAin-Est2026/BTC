@@ -8,6 +8,11 @@ TP1:     H1 swing high/low
 TP2:     H4 swing high/low
 TP3:     H4 keyingi kuchli level
 Cron:    0 */4 * * * python3 bot.py
+
+TUZATISHLAR (bu versiyada):
+1. H4 uchun 400 bar, M15 uchun 150 bar — EMA200/MACD to'g'ri "isinishi" uchun
+2. H4 trend chegarasi endi ATR asosida (narx foiziga emas)
+3. EMA9/21 cross-oynasi cron intervaliga (4 soat) mos qilib kengaytirildi
 """
 
 import os, time, requests, pandas as pd
@@ -127,20 +132,29 @@ def analyze() -> dict | None:
     print(f"  Narx: {price}")
 
     # ── H4: asosiy trend ──────────────────────────────────────────────────────
-    h4 = get_candles("4h", 250)
-    if h4 is None or len(h4) < 200:
+    # TUZATISH: 250 -> 400 bar, EMA200 to'g'ri "isinishi" uchun
+    # (ewm formulasi ma'lumot boshidan hisoblanadi, EMA200 uchun kamida
+    #  ~3-4x period uzunlikda tarix kerak, aks holda qiymat noaniq bo'ladi)
+    h4 = get_candles("4h", 400)
+    if h4 is None or len(h4) < 250:
         print("  H4 yetarli emas")
         return None
 
     e50_h4  = float(ema(h4["close"], 50).iloc[-1])
     e200_h4 = float(ema(h4["close"], 200).iloc[-1])
+    atr_h4  = atr(h4, 14)
 
-    if e50_h4 > e200_h4 * 1.001:
+    # TUZATISH: narx foiziga (0.1%) emas, ATR ga bog'liq chegara.
+    # Foizga bog'liq chegara narx darajasiga (2000 vs 3000) qarab
+    # turlicha "qattiqlik" beradi va trendni tasodifiy rad etadi.
+    buffer_h4 = atr_h4 * 0.15
+
+    if e50_h4 > e200_h4 + buffer_h4:
         trend = "BUY"
-    elif e50_h4 < e200_h4 * 0.999:
+    elif e50_h4 < e200_h4 - buffer_h4:
         trend = "SELL"
     else:
-        print("  H4 trend aniq emas")
+        print(f"  H4 trend aniq emas (EMA50={e50_h4:.2f} EMA200={e200_h4:.2f} buffer={buffer_h4:.2f})")
         return None
 
     print(f"  H4 trend: {trend}")
@@ -162,39 +176,48 @@ def analyze() -> dict | None:
         return None
 
     # ── M15: entry ────────────────────────────────────────────────────────────
-    m15 = get_candles("15min", 60)
-    if m15 is None or len(m15) < 40:
+    # TUZATISH: 60 -> 150 bar, MACD(12,26,9) to'g'ri hisoblanishi uchun
+    m15 = get_candles("15min", 150)
+    if m15 is None or len(m15) < 100:
         print("  M15 yetarli emas")
         return None
 
     e9_m15  = ema(m15["close"], 9)
     e21_m15 = ema(m15["close"], 21)
 
+    # TUZATISH: cross-oyna cron intervaliga (4 soat) mos qilindi.
+    # 4 soat = 16 ta M15 bar. Avval faqat oxirgi 5 bar (75 daqiqa)
+    # tekshirilardi — bu cron oralig'ining kichik qismi bo'lib,
+    # kesishuv shu qisqa oynadan tashqarida sodir bo'lsa signal
+    # butunlay o'tkazib yuborilardi.
+    WINDOW_M15 = 16
     cross_up_m15 = any(
         e9_m15.iloc[i-1] < e21_m15.iloc[i-1] and e9_m15.iloc[i] >= e21_m15.iloc[i]
-        for i in range(-5, 0)
+        for i in range(-WINDOW_M15, 0)
     )
     cross_down_m15 = any(
         e9_m15.iloc[i-1] > e21_m15.iloc[i-1] and e9_m15.iloc[i] <= e21_m15.iloc[i]
-        for i in range(-5, 0)
+        for i in range(-WINDOW_M15, 0)
     )
 
     # ── M5: sniper entry ──────────────────────────────────────────────────────
-    m5 = get_candles("5min", 60)
-    if m5 is None or len(m5) < 30:
+    m5 = get_candles("5min", 100)
+    if m5 is None or len(m5) < 60:
         print("  M5 yetarli emas")
         return None
 
     e9_m5  = ema(m5["close"], 9)
     e21_m5 = ema(m5["close"], 21)
 
+    # TUZATISH: 4 soat = 48 ta M5 bar
+    WINDOW_M5 = 48
     cross_up_m5 = any(
         e9_m5.iloc[i-1] < e21_m5.iloc[i-1] and e9_m5.iloc[i] >= e21_m5.iloc[i]
-        for i in range(-4, 0)
+        for i in range(-WINDOW_M5, 0)
     )
     cross_down_m5 = any(
         e9_m5.iloc[i-1] > e21_m5.iloc[i-1] and e9_m5.iloc[i] <= e21_m5.iloc[i]
-        for i in range(-4, 0)
+        for i in range(-WINDOW_M5, 0)
     )
 
     if trend == "BUY":
