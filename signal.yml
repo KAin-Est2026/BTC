@@ -2,13 +2,8 @@ name: Pro Signal Bot
 
 on:
   schedule:
-    - cron: '0 6 * * *'    # Toshkent 11:00 — London sessiyasi
-    - cron: '0 11 * * *'   # Toshkent 16:00 — London + NY eng kuchli
-    - cron: '0 15 * * *'   # Toshkent 20:00 — NY o'rtasi + Crypto
+    - cron: '*/15 * * * *'
   workflow_dispatch:
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   signal:
