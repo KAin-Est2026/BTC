@@ -1,4 +1,4 @@
-
+"""
 bot.py — XAU/USD Sniper Scalping Bot
 ======================================
 Tahlil:  H4 (trend) + H1 (zona)
