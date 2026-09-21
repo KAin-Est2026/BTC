@@ -2,26 +2,70 @@ name: Pro Signal Bot
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    # Du–Ju, 07:00–21:59 UTC: yozgi va qishki vaqtda ham
+    # London ochilishidan New York yopilishigacha qamrab oladi
+    - cron: '2,17,32,47 7-21 * * 1-5'
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Sessiyadan tashqarida ham ishga tushirish (test uchun)'
+        type: boolean
+        default: false
 
 jobs:
   signal:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Sessiya tekshiruvi
+        id: session
+        shell: python3 {0}
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          import os
+          from datetime import datetime, timezone
+          from zoneinfo import ZoneInfo
+
+          # nomi: (vaqt zonasi, ochilish soati, yopilish soati) — mahalliy vaqtda
+          SESSIONS = {
+              "London":   ("Europe/London",    8, 17),
+              "New York": ("America/New_York", 8, 17),
+          }
+
+          now = datetime.now(timezone.utc)
+          active = []
+          for name, (tz, start, end) in SESSIONS.items():
+              local = now.astimezone(ZoneInfo(tz))  # yozgi/qishki vaqt avtomatik
+              if local.weekday() < 5 and start <= local.hour < end:
+                  active.append(name)
+
+          force = os.getenv("FORCE") == "true"
+          should_run = bool(active) or force
+          label = " + ".join(active) or ("Test" if force else "Yopiq")
+
+          print(f"{now:%Y-%m-%d %H:%M} UTC -> {label}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"active={'true' if should_run else 'false'}\n")
+              f.write(f"name={label}\n")
+
       - uses: actions/checkout@v4.2.2
+        if: steps.session.outputs.active == 'true'
 
       - uses: actions/setup-python@v5.4.0
+        if: steps.session.outputs.active == 'true'
         with:
           python-version: '3.11'
 
       - name: Kutubxonalar
+        if: steps.session.outputs.active == 'true'
         run: pip install requests pandas
 
       - name: Signal tahlili
+        if: steps.session.outputs.active == 'true'
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TWELVE_DATA_KEY:  ${{ secrets.TWELVE_DATA_KEY }}
+          SESSION:          ${{ steps.session.outputs.name }}
         run: python bot.py
