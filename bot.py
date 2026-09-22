@@ -2,47 +2,28 @@
 bot.py — XAU/USD Sniper Scalping Bot
 ======================================
 Tahlil:  H4 (trend) + H1 (zona)
-Entry:   M15 + M5 (EMA9/21 kesishuvi, faqat yopilgan shamlarda)
+Entry:   M15 + M5 (EMA9/21 crossover)
 SL:      0.7 × ATR (M15)
-TP:      H1/H4 swing levellar (kamida 1R), topilmasa ATR
-Cron:    */15 7-21 * * 1-5  (GitHub Actions)
-Signal:  faqat London va New York sessiyalarida
+TP1:     H1 swing high/low
+TP2:     H4 swing high/low
+TP3:     H4 keyingi kuchli level
+Cron:    0 */4 * * * python3 bot.py
+
+TUZATISHLAR (bu versiyada):
+1. H4 uchun 400 bar, M15 uchun 150 bar — EMA200/MACD to'g'ri "isinishi" uchun
+2. H4 trend chegarasi endi ATR asosida (narx foiziga emas)
+3. EMA9/21 cross-oynasi cron intervaliga (4 soat) mos qilib kengaytirildi
 """
 
 import os, time, requests, pandas as pd
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 TWELVE_KEY       = os.environ["TWELVE_DATA_KEY"]
 
-SYMBOL    = "XAU/USD"
-DIGITS    = 2
-RUN_EVERY = 15    # daqiqa — workflow'dagi cron bilan bir xil bo'lsin
-MIN_RR    = 1.0   # TP kirishdan kamida shuncha R uzoqda bo'lsin
-
-# Sessiyalar mahalliy vaqtda (qishki/yozgi vaqtni Python o'zi hisoblaydi)
-SESSIONS = {
-    "London":   ("Europe/London",    8, 17),
-    "New York": ("America/New_York", 8, 17),
-}
-
-# ── Vaqt ──────────────────────────────────────────────────────────────────────
-
-def current_slot(now: datetime) -> datetime:
-    """Cron slot: 10:07 -> 10:00 (GitHub kechiksa ham oyna to'g'ri olinadi)"""
-    return now.replace(minute=now.minute - now.minute % RUN_EVERY,
-                       second=0, microsecond=0)
-
-def active_sessions(t: datetime) -> list:
-    """Hozir ochiq sessiyalar"""
-    res = []
-    for name, (tz, start, end) in SESSIONS.items():
-        local = t.astimezone(ZoneInfo(tz))
-        if local.weekday() < 5 and start <= local.hour < end:
-            res.append(name)
-    return res
+SYMBOL = "XAU/USD"
+DIGITS = 2
 
 # ── Indikatorlar ──────────────────────────────────────────────────────────────
 
@@ -50,31 +31,20 @@ def ema(s: pd.Series, p: int) -> pd.Series:
     return s.ewm(span=p, adjust=False).mean()
 
 def atr(df: pd.DataFrame, p: int = 14) -> float:
-    """ATR — Wilder usuli (TradingView / MT5 dagi bilan bir xil)"""
     tr = pd.concat([
         df["high"] - df["low"],
         (df["high"] - df["close"].shift()).abs(),
         (df["low"]  - df["close"].shift()).abs(),
     ], axis=1).max(axis=1)
-    return float(tr.ewm(alpha=1 / p, adjust=False).mean().iloc[-1])
+    val = tr.rolling(p).mean().dropna()
+    return float(val.iloc[-1]) if len(val) > 0 else 1.0
 
 def macd_hist(s: pd.Series) -> pd.Series:
     m = ema(s, 12) - ema(s, 26)
     return m - ema(m, 9)
 
-def crossed(df: pd.DataFrame, trend: str, since: datetime, until: datetime) -> bool:
-    """EMA9/21 kesishuvi (since, until] oralig'ida yopilgan shamda bo'ldimi.
-    Oyna = oxirgi 15 daqiqa, shu sabab har kesishuv faqat BIR marta signal beradi."""
-    d = ema(df["close"], 9) - ema(df["close"], 21)
-    if trend == "BUY":
-        cross = (d.shift() < 0) & (d >= 0)
-    else:
-        cross = (d.shift() > 0) & (d <= 0)
-    window = (df["close_time"] > since) & (df["close_time"] <= until)
-    return bool((cross & window).any())
-
 def swing_highs(df: pd.DataFrame, n: int = 3) -> list:
-    """Swing high: har tomonida n ta bar pastroq"""
+    """Swing high levellarni topish — har tomonida n ta bar past bo'lishi kerak"""
     levels = []
     for i in range(n, len(df) - n):
         h = df["high"].iloc[i]
@@ -84,7 +54,7 @@ def swing_highs(df: pd.DataFrame, n: int = 3) -> list:
     return sorted(set(round(x, DIGITS) for x in levels))
 
 def swing_lows(df: pd.DataFrame, n: int = 3) -> list:
-    """Swing low: har tomonida n ta bar balandroq"""
+    """Swing low levellarni topish"""
     levels = []
     for i in range(n, len(df) - n):
         l = df["low"].iloc[i]
@@ -93,33 +63,15 @@ def swing_lows(df: pd.DataFrame, n: int = 3) -> list:
             levels.append(l)
     return sorted(set(round(x, DIGITS) for x in levels))
 
-def pick_tps(trend: str, price: float, sl_dist: float, atr_val: float,
-             lv_h1: list, lv_h4: list) -> list:
-    """3 ta TP, doim tartibli (TP1 eng yaqin):
-    - eng yaqin H1 level + eng yaqin H4 levellar
-    - kamida MIN_RR uzoqlikda (juda yaqin level R/R ni buzadi)
-    - bir-biriga 0.3×ATR dan yaqin levellar tashlanadi (TP1 = TP2 bo'lmaydi)
-    - yetmasa ATR zaxira (2×, 3×, 4× ATR)"""
-    sign = 1 if trend == "BUY" else -1
-    gap  = atr_val * 0.3
+def next_level_above(levels: list, price: float) -> float | None:
+    """Narxdan yuqoridagi eng yaqin level"""
+    above = [l for l in levels if l > price * 1.0005]
+    return min(above) if above else None
 
-    def nearest(levels: list, k: int) -> list:
-        ok = [l for l in levels if (l - price) * sign >= sl_dist * MIN_RR]
-        return sorted(ok, key=lambda l: abs(l - price))[:k]
-
-    tps = []
-    for l in nearest(lv_h1, 1) + nearest(lv_h4, 3):
-        if len(tps) < 3 and all(abs(l - t) >= gap for t in tps):
-            tps.append(l)
-
-    m = 2.0
-    while len(tps) < 3:
-        l = round(price + sign * atr_val * m, DIGITS)
-        if all(abs(l - t) >= gap for t in tps):
-            tps.append(l)
-        m += 1.0
-
-    return sorted(tps, key=lambda l: abs(l - price))
+def next_level_below(levels: list, price: float) -> float | None:
+    """Narxdan pastdagi eng yaqin level"""
+    below = [l for l in levels if l < price * 0.9995]
+    return max(below) if below else None
 
 # ── API ───────────────────────────────────────────────────────────────────────
 
@@ -140,15 +92,11 @@ def get_price() -> float | None:
             params={"symbol": SYMBOL, "apikey": TWELVE_KEY},
             timeout=10
         ).json()
-        if "price" in r:
-            return float(r["price"])
-        print(f"  [price] {r.get('message', '?')}")
-    except Exception as e:
-        print(f"  [price] {e}")
-    return None
+        return float(r["price"]) if "price" in r else None
+    except:
+        return None
 
-def get_candles(interval: str, size: int, now: datetime) -> pd.DataFrame | None:
-    """Faqat YOPILGAN shamlar — shakllanayotgan oxirgi sham tashlab yuboriladi"""
+def get_candles(interval: str, size: int) -> pd.DataFrame | None:
     _wait()
     try:
         r = requests.get(
@@ -157,112 +105,193 @@ def get_candles(interval: str, size: int, now: datetime) -> pd.DataFrame | None:
                 "symbol":     SYMBOL,
                 "interval":   interval,
                 "outputsize": size,
-                "timezone":   "UTC",
                 "apikey":     TWELVE_KEY,
             },
             timeout=15
         ).json()
         if "values" not in r:
-            print(f"  [{interval}] {r.get('message', '?')}")
+            print(f"  [{interval}] {r.get('message','?')}")
             return None
         df = pd.DataFrame(r["values"]).iloc[::-1].reset_index(drop=True)
         for c in ["open", "high", "low", "close"]:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-        df["close_time"] = pd.to_datetime(df["datetime"], utc=True) + pd.Timedelta(interval)
-        df = df.dropna(subset=["open", "high", "low", "close"])
-        return df[df["close_time"] <= now].reset_index(drop=True)
+        return df.dropna(subset=["open","high","low","close"]).reset_index(drop=True)
     except Exception as e:
         print(f"  [{interval}] {e}")
         return None
 
 # ── Tahlil ────────────────────────────────────────────────────────────────────
 
-def analyze(now: datetime, slot: datetime) -> dict | None:
-    since = slot - timedelta(minutes=RUN_EVERY)
+def analyze() -> dict | None:
 
-    # ── H4: asosiy trend (400 bar — EMA200 to'g'ri "isinishi" uchun) ─────────
-    h4 = get_candles("4h", 400, now)
-    if h4 is None or len(h4) < 250:
-        print("  H4 yetarli emas")
-        return None
-
-    e50_h4    = float(ema(h4["close"], 50).iloc[-1])
-    e200_h4   = float(ema(h4["close"], 200).iloc[-1])
-    buffer_h4 = atr(h4) * 0.15
-
-    if e50_h4 > e200_h4 + buffer_h4:
-        trend = "BUY"
-    elif e50_h4 < e200_h4 - buffer_h4:
-        trend = "SELL"
-    else:
-        print(f"  H4 trend aniq emas (EMA50={e50_h4:.2f} EMA200={e200_h4:.2f})")
-        return None
-    print(f"  H4 trend: {trend}")
-
-    # ── H1: zona tasdiqi (200 bar — EMA50 to'liq "isinishi" uchun) ──────────
-    h1 = get_candles("1h", 200, now)
-    if h1 is None or len(h1) < 150:
-        print("  H1 yetarli emas")
-        return None
-
-    e50_h1   = float(ema(h1["close"], 50).iloc[-1])
-    close_h1 = float(h1["close"].iloc[-1])
-    if trend == "BUY" and close_h1 < e50_h1:
-        print("  H1: narx EMA50 ostida — BUY o'tkazildi")
-        return None
-    if trend == "SELL" and close_h1 > e50_h1:
-        print("  H1: narx EMA50 ustida — SELL o'tkazildi")
-        return None
-
-    # ── M15 / M5: faqat oxirgi 15 daqiqada yopilgan shamdagi kesishuv ────────
-    m15 = get_candles("15min", 150, now)
-    if m15 is None or len(m15) < 100:
-        print("  M15 yetarli emas")
-        return None
-
-    if crossed(m15, trend, since, slot):
-        entry_tf = "M15"
-    else:
-        m5 = get_candles("5min", 100, now)
-        if m5 is None or len(m5) < 60:
-            print("  M5 yetarli emas")
-            return None
-        if not crossed(m5, trend, since, slot):
-            print("  M15/M5 da yangi kesishuv yo'q")
-            return None
-        entry_tf = "M5"
-
-    # ── MACD tasdiqi (M15) ───────────────────────────────────────────────────
-    hist  = macd_hist(m15["close"])
-    h_now = float(hist.iloc[-1])
-    h_prv = float(hist.iloc[-2])
-    if trend == "BUY" and not (h_now > 0 or h_now > h_prv):
-        print("  MACD BUY ni tasdiqlamadi")
-        return None
-    if trend == "SELL" and not (h_now < 0 or h_now < h_prv):
-        print("  MACD SELL ni tasdiqlamadi")
-        return None
-
-    # ── Narx: eng oxirida olinadi — entry iloji boricha yangi bo'lsin ────────
+    # Real narx
     price = get_price()
     if price is None:
         print("  Narx olinmadi")
         return None
     print(f"  Narx: {price}")
 
-    # ── SL: 0.7 × ATR (M15) ──────────────────────────────────────────────────
-    atr_m15 = atr(m15)
-    sl_dist = round(atr_m15 * 0.7, DIGITS)
-    sl = round(price - sl_dist if trend == "BUY" else price + sl_dist, DIGITS)
+    # ── H4: asosiy trend ──────────────────────────────────────────────────────
+    # TUZATISH: 250 -> 400 bar, EMA200 to'g'ri "isinishi" uchun
+    # (ewm formulasi ma'lumot boshidan hisoblanadi, EMA200 uchun kamida
+    #  ~3-4x period uzunlikda tarix kerak, aks holda qiymat noaniq bo'ladi)
+    h4 = get_candles("4h", 400)
+    if h4 is None or len(h4) < 250:
+        print("  H4 yetarli emas")
+        return None
 
-    # ── TP: haqiqiy swing levellar ───────────────────────────────────────────
-    if trend == "BUY":
-        tp1, tp2, tp3 = pick_tps(trend, price, sl_dist, atr_m15,
-                                 swing_highs(h1), swing_highs(h4))
+    e50_h4  = float(ema(h4["close"], 50).iloc[-1])
+    e200_h4 = float(ema(h4["close"], 200).iloc[-1])
+    atr_h4  = atr(h4, 14)
+
+    # TUZATISH: narx foiziga (0.1%) emas, ATR ga bog'liq chegara.
+    # Foizga bog'liq chegara narx darajasiga (2000 vs 3000) qarab
+    # turlicha "qattiqlik" beradi va trendni tasodifiy rad etadi.
+    buffer_h4 = atr_h4 * 0.15
+
+    if e50_h4 > e200_h4 + buffer_h4:
+        trend = "BUY"
+    elif e50_h4 < e200_h4 - buffer_h4:
+        trend = "SELL"
     else:
-        tp1, tp2, tp3 = pick_tps(trend, price, sl_dist, atr_m15,
-                                 swing_lows(h1), swing_lows(h4))
+        print(f"  H4 trend aniq emas (EMA50={e50_h4:.2f} EMA200={e200_h4:.2f} buffer={buffer_h4:.2f})")
+        return None
 
+    print(f"  H4 trend: {trend}")
+
+    # ── H1: zona tasdiqi ──────────────────────────────────────────────────────
+    h1 = get_candles("1h", 100)
+    if h1 is None or len(h1) < 50:
+        print("  H1 yetarli emas")
+        return None
+
+    e50_h1    = float(ema(h1["close"], 50).iloc[-1])
+    price_h1  = float(h1["close"].iloc[-1])
+
+    if trend == "BUY"  and price_h1 < e50_h1:
+        print("  H1: narx EMA50 ostida — BUY o'tkazildi")
+        return None
+    if trend == "SELL" and price_h1 > e50_h1:
+        print("  H1: narx EMA50 ustida — SELL o'tkazildi")
+        return None
+
+    # ── M15: entry ────────────────────────────────────────────────────────────
+    # TUZATISH: 60 -> 150 bar, MACD(12,26,9) to'g'ri hisoblanishi uchun
+    m15 = get_candles("15min", 150)
+    if m15 is None or len(m15) < 100:
+        print("  M15 yetarli emas")
+        return None
+
+    e9_m15  = ema(m15["close"], 9)
+    e21_m15 = ema(m15["close"], 21)
+
+    # TUZATISH: cross-oyna cron intervaliga (4 soat) mos qilindi.
+    # 4 soat = 16 ta M15 bar. Avval faqat oxirgi 5 bar (75 daqiqa)
+    # tekshirilardi — bu cron oralig'ining kichik qismi bo'lib,
+    # kesishuv shu qisqa oynadan tashqarida sodir bo'lsa signal
+    # butunlay o'tkazib yuborilardi.
+    WINDOW_M15 = 16
+    cross_up_m15 = any(
+        e9_m15.iloc[i-1] < e21_m15.iloc[i-1] and e9_m15.iloc[i] >= e21_m15.iloc[i]
+        for i in range(-WINDOW_M15, 0)
+    )
+    cross_down_m15 = any(
+        e9_m15.iloc[i-1] > e21_m15.iloc[i-1] and e9_m15.iloc[i] <= e21_m15.iloc[i]
+        for i in range(-WINDOW_M15, 0)
+    )
+
+    # ── M5: sniper entry ──────────────────────────────────────────────────────
+    m5 = get_candles("5min", 100)
+    if m5 is None or len(m5) < 60:
+        print("  M5 yetarli emas")
+        return None
+
+    e9_m5  = ema(m5["close"], 9)
+    e21_m5 = ema(m5["close"], 21)
+
+    # TUZATISH: 4 soat = 48 ta M5 bar
+    WINDOW_M5 = 48
+    cross_up_m5 = any(
+        e9_m5.iloc[i-1] < e21_m5.iloc[i-1] and e9_m5.iloc[i] >= e21_m5.iloc[i]
+        for i in range(-WINDOW_M5, 0)
+    )
+    cross_down_m5 = any(
+        e9_m5.iloc[i-1] > e21_m5.iloc[i-1] and e9_m5.iloc[i] <= e21_m5.iloc[i]
+        for i in range(-WINDOW_M5, 0)
+    )
+
+    if trend == "BUY":
+        m15_ok = cross_up_m15
+        m5_ok  = cross_up_m5
+    else:
+        m15_ok = cross_down_m15
+        m5_ok  = cross_down_m5
+
+    if not m15_ok and not m5_ok:
+        print("  M15 va M5 cross yo'q")
+        return None
+
+    entry_tf = "M15" if m15_ok else "M5"
+
+    # ── MACD tasdiqi (M15) ────────────────────────────────────────────────────
+    hist  = macd_hist(m15["close"])
+    h_now = float(hist.iloc[-1])
+    h_prv = float(hist.iloc[-2])
+
+    if trend == "BUY"  and not (h_now > 0 or h_now > h_prv):
+        print("  MACD BUY tasdiqlamadi")
+        return None
+    if trend == "SELL" and not (h_now < 0 or h_now < h_prv):
+        print("  MACD SELL tasdiqlamadi")
+        return None
+
+    # ── SL: 0.7 × ATR (M15) ──────────────────────────────────────────────────
+    atr_m15 = atr(m15, 14)
+    sl_dist = round(atr_m15 * 0.7, DIGITS)
+
+    if trend == "BUY":
+        sl = round(price - sl_dist, DIGITS)
+    else:
+        sl = round(price + sl_dist, DIGITS)
+
+    # ── TP: haqiqiy swing levellar ────────────────────────────────────────────
+    h1_highs = swing_highs(h1, n=3)
+    h1_lows  = swing_lows(h1,  n=3)
+    h4_highs = swing_highs(h4, n=3)
+    h4_lows  = swing_lows(h4,  n=3)
+
+    if trend == "BUY":
+        tp1 = next_level_above(h1_highs, price)
+        tp2 = next_level_above(h4_highs, price)
+        # TP3: H4 dan ikkinchi level
+        h4_above = sorted([l for l in h4_highs if l > price * 1.0005])
+        tp3 = h4_above[1] if len(h4_above) >= 2 else None
+
+        # Fallback: swing topilmasa ATR ishlatish
+        if tp1 is None: tp1 = round(price + atr_m15 * 2.0, DIGITS)
+        if tp2 is None: tp2 = round(price + atr_m15 * 3.0, DIGITS)
+        if tp3 is None: tp3 = round(price + atr_m15 * 4.0, DIGITS)
+
+        # Tartib: tp1 < tp2 < tp3
+        tp1 = min(tp1, tp2, tp3)
+        tp3 = max(tp1, tp2, tp3)
+        tp2 = sorted([tp1, tp2, tp3])[1]
+
+    else:
+        tp1 = next_level_below(h1_lows, price)
+        tp2 = next_level_below(h4_lows, price)
+        h4_below = sorted([l for l in h4_lows if l < price * 0.9995], reverse=True)
+        tp3 = h4_below[1] if len(h4_below) >= 2 else None
+
+        if tp1 is None: tp1 = round(price - atr_m15 * 2.0, DIGITS)
+        if tp2 is None: tp2 = round(price - atr_m15 * 3.0, DIGITS)
+        if tp3 is None: tp3 = round(price - atr_m15 * 4.0, DIGITS)
+
+        tp1 = max(tp1, tp2, tp3)
+        tp3 = min(tp1, tp2, tp3)
+        tp2 = sorted([tp1, tp2, tp3], reverse=True)[1]
+
+    # R/R hisoblash
     def rr(tp):
         return round(abs(tp - price) / sl_dist, 1) if sl_dist > 0 else 0
 
@@ -284,22 +313,23 @@ def analyze(now: datetime, slot: datetime) -> dict | None:
 # ── Telegram ──────────────────────────────────────────────────────────────────
 
 def format_msg(s: dict) -> str:
-    buy = s["action"] == "BUY"
-    now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+    e   = "🟢" if s["action"] == "BUY" else "🔴"
+    act = "SOTIB OL" if s["action"] == "BUY" else "SOT"
+    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+    tr  = "📈 Uptrend" if s["action"] == "BUY" else "📉 Downtrend"
 
     return (
-        f"{'🟢' if buy else '🔴'} <b>XAU/USD — {'SOTIB OL' if buy else 'SOT'}</b> 📊\n"
+        f"{e} <b>XAU/USD — {act}</b> 🪥 \n"
         f"<i>Oltin</i>\n\n"
         f"💰 Entry:  <b>{s['price']:.2f}</b>\n"
         f"🎯 TP1:   <b>{s['tp1']:.2f}</b>  (1:{s['rr1']}R)\n"
         f"🎯 TP2:   <b>{s['tp2']:.2f}</b>  (1:{s['rr2']}R)\n"
         f"🎯 TP3:   <b>{s['tp3']:.2f}</b>  (1:{s['rr3']}R)\n"
-        f"🛑 SL:    <b>{s['sl']:.2f}</b>  (0.7×ATR | ATR: {s['atr']})\n\n"
-        f"✅ H4 {'📈 Uptrend' if buy else '📉 Downtrend'}\n"
-        f"✅ H1 narx EMA50 {'ustida' if buy else 'ostida'}\n"
-        f"✅ {s['entry_tf']} EMA9/21 kesdi (yopilgan sham)\n"
+        f"🛑 SL:    <b>{s['sl']:.2f}</b>  (0.7R | ATR:{s['atr']})\n\n"
+        f"✅ H4 {tr}\n"
+        f"✅ H1 narx EMA50 {'ustida' if s['action']=='BUY' else 'ostida'}\n"
+        f"✅ {s['entry_tf']} EMA9/21 kesdi\n"
         f"✅ MACD: {s['macd']}\n\n"
-        f"🕐 Sessiya: {s['session']}\n"
         f"⏰ {now}\n"
         f"⚠️ Risk: 1-2%"
     )
@@ -318,28 +348,26 @@ def send(msg: str):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    now  = datetime.now(timezone.utc)
-    slot = current_slot(now)
-    print(f"\n{'='*40}\nXAU/USD Bot: {now:%d.%m.%Y %H:%M} UTC\n{'='*40}")
-
-    sessions = active_sessions(slot)
-    if not sessions:
-        print("  Sessiya yopiq — tekshiruv yo'q")
-        return
-    session = " + ".join(sessions)
-    print(f"  Sessiya: {session}")
+    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+    print(f"\n{'='*40}\nBTC/USD Bot: {now}\n{'='*40}")
 
     try:
-        res = analyze(now, slot)
+        res = analyze()
         if res:
-            res["session"] = session
             print(
-                f"\n✓ {res['action']} | Entry:{res['price']} | "
-                f"TP1:{res['tp1']} TP2:{res['tp2']} TP3:{res['tp3']} | SL:{res['sl']}"
+                f"\n✓ {res['action']} | "
+                f"Entry:{res['price']} | "
+                f"TP1:{res['tp1']} TP2:{res['tp2']} TP3:{res['tp3']} | "
+                f"SL:{res['sl']}"
             )
             send(format_msg(res))
         else:
-            print("  Signal yo'q")   # Telegram'ga yuborilmaydi — spam bo'lmasin
+            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+            send(
+                f"🪥 <b>XAU/USD — {now}</b>\n\n"
+                f"Signal yo'q.\n"
+                f"⏰ Keyingi tekshiruv 4 soatdan so'ng."
+            )
     except Exception as e:
         print(f"XATO: {e}")
         import traceback; traceback.print_exc()
