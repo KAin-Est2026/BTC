@@ -313,25 +313,25 @@ def analyze() -> dict | None:
 # ── Telegram ──────────────────────────────────────────────────────────────────
 
 def format_msg(s: dict) -> str:
-    e   = "🟢" if s["action"] == "BUY" else "🔴"
+    e   = "" if s["action"] == "BUY" else ""
     act = "SOTIB OL" if s["action"] == "BUY" else "SOT"
     now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
     tr  = "📈 Uptrend" if s["action"] == "BUY" else "📉 Downtrend"
 
     return (
-        f"{e} <b>XAU/USD — {act}</b> 🧌 \n"
+        f"{e} <b>XAU/USD — {act}</b>  \n"
         f"<i>Oltin</i>\n\n"
-        f"💰 Entry:  <b>{s['price']:.2f}</b>\n"
-        f"🎯 TP1:   <b>{s['tp1']:.2f}</b>  (1:{s['rr1']}R)\n"
-        f"🎯 TP2:   <b>{s['tp2']:.2f}</b>  (1:{s['rr2']}R)\n"
-        f"🎯 TP3:   <b>{s['tp3']:.2f}</b>  (1:{s['rr3']}R)\n"
-        f"🛑 SL:    <b>{s['sl']:.2f}</b>  (0.7R | ATR:{s['atr']})\n\n"
-        f"✅ H4 {tr}\n"
-        f"✅ H1 narx EMA50 {'ustida' if s['action']=='BUY' else 'ostida'}\n"
-        f"✅ {s['entry_tf']} EMA9/21 kesdi\n"
-        f"✅ MACD: {s['macd']}\n\n"
-        f"⏰ {now}\n"
-        f"⚠️ Risk: 1-2%"
+        f" Entry:  <b>{s['price']:.2f}</b>\n"
+        f" TP1:   <b>{s['tp1']:.2f}</b>  (1:{s['rr1']}R)\n"
+        f" TP2:   <b>{s['tp2']:.2f}</b>  (1:{s['rr2']}R)\n"
+        f"TP3:   <b>{s['tp3']:.2f}</b>  (1:{s['rr3']}R)\n"
+        f" SL:    <b>{s['sl']:.2f}</b>  (0.7R | ATR:{s['atr']})\n\n"
+        f" H4 {tr}\n"
+        f" H1 narx EMA50 {'ustida' if s['action']=='BUY' else 'ostida'}\n"
+        f" {s['entry_tf']} EMA9/21 kesdi\n"
+        f" MACD: {s['macd']}\n\n"
+        f" {now}\n"
+        f" Risk: 1-2%"
     )
 
 def send(msg: str):
@@ -364,9 +364,9 @@ def main():
         else:
             now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
             send(
-                f"🧌 <b>XAU/USD — {now}</b>\n\n"
+                f" <b>XAU/USD — {now}</b>\n\n"
                 f"Signal yo'q.\n"
-                f"⏰ Keyingi tekshiruv 4 soatdan so'ng."
+                f" Keyingi tekshiruv 4 soatdan so'ng."
             )
     except Exception as e:
         print(f"XATO: {e}")
